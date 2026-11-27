@@ -20,14 +20,341 @@ jobs:
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKM" --licenses > /dev/null || true
           "$SDKM" "platforms;android-35" "build-tools;35.0.0" || true
-      - name: Find project folder
-        id: find
+      - name: Create app files
         run: |
-          f=$(find . -name settings.gradle -not -path './.git/*' | head -1)
-          echo "Found: $f"
-          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
+          mkdir -p "$(dirname app/build.gradle)"
+          cat > app/build.gradle <<'EOF_0'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.ichigowidget'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'com.example.ichigowidget'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          EOF_0
+          mkdir -p "$(dirname app/src/main/AndroidManifest.xml)"
+          cat > app/src/main/AndroidManifest.xml <<'EOF_1'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:theme="@android:style/Theme.Material.NoActionBar" android:label="Ichigo Bankai Widget" android:allowBackup="false" android:icon="@drawable/app_icon">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+                  </activity>
+                  <receiver android:name=".IchigoWidgetProvider" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                          <action android:name="com.example.ichigowidget.ACTION_WIDGET_TICK" />
+                          <action android:name="com.example.ichigowidget.ACTION_BANKAI_TOGGLE" />
+                          <action android:name="android.intent.action.TIME_CHANGED" />
+                          <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                          <action android:name="android.intent.action.DATE_CHANGED" />
+                          <action android:name="android.intent.action.POWER_CONNECTED" />
+                          <action android:name="android.intent.action.POWER_DISCONNECTED" />
+                      </intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/ichigo_widget_info" />
+                  </receiver>
+              </application>
+          </manifest>
+          EOF_1
+          mkdir -p "$(dirname app/src/main/java/com/example/ichigowidget/IchigoWidgetProvider.kt)"
+          cat > app/src/main/java/com/example/ichigowidget/IchigoWidgetProvider.kt <<'EOF_2'
+          package com.example.ichigowidget
+
+          import android.app.AlarmManager
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.os.BatteryManager
+          import android.widget.RemoteViews
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class IchigoWidgetProvider : AppWidgetProvider() {
+              companion object {
+                  const val ACTION_TICK = "com.example.ichigowidget.ACTION_WIDGET_TICK"
+                  const val ACTION_TOGGLE = "com.example.ichigowidget.ACTION_BANKAI_TOGGLE"
+                  private const val PREFS = "ichigo_widget_state"
+                  private const val KEY_BANKAI = "bankai_enabled"
+              }
+
+              override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
+                  ids.forEach { updateOne(context, manager, it) }
+                  scheduleMinuteRefresh(context)
+              }
+
+              override fun onReceive(context: Context, intent: Intent) {
+                  super.onReceive(context, intent)
+                  when (intent.action) {
+                      ACTION_TOGGLE -> {
+                          val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                          val bankai = !prefs.getBoolean(KEY_BANKAI, true)
+                          prefs.edit().putBoolean(KEY_BANKAI, bankai).apply()
+                          refreshAll(context)
+                      }
+                      ACTION_TICK, Intent.ACTION_TIME_CHANGED, Intent.ACTION_TIMEZONE_CHANGED,
+                      Intent.ACTION_DATE_CHANGED, Intent.ACTION_BATTERY_CHANGED,
+                      Intent.ACTION_POWER_CONNECTED, Intent.ACTION_POWER_DISCONNECTED -> refreshAll(context)
+                  }
+              }
+
+              private fun refreshAll(context: Context) {
+                  val manager = AppWidgetManager.getInstance(context)
+                  manager.getAppWidgetIds(ComponentName(context, IchigoWidgetProvider::class.java)).forEach { updateOne(context, manager, it) }
+                  scheduleMinuteRefresh(context)
+              }
+
+              private fun scheduleMinuteRefresh(context: Context) {
+                  val alarm = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                  val intent = Intent(context, IchigoWidgetProvider::class.java).setAction(ACTION_TICK)
+                  val pending = PendingIntent.getBroadcast(context, 7001, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                  val nextMinute = (System.currentTimeMillis() / 60000L + 1L) * 60000L
+                  alarm.setRepeating(AlarmManager.RTC, nextMinute, 60000L, pending)
+              }
+
+              private fun updateOne(context: Context, manager: AppWidgetManager, id: Int) {
+                  val views = RemoteViews(context.packageName, R.layout.ichigo_widget)
+                  val now = Date()
+                  views.setTextViewText(R.id.time, SimpleDateFormat("HH:mm", Locale.getDefault()).format(now))
+                  views.setTextViewText(R.id.date, SimpleDateFormat("EEE • dd MMM yyyy", Locale.getDefault()).format(now).uppercase(Locale.getDefault()))
+
+                  val batteryIntent = context.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                  val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, 0) ?: 0
+                  val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+                  val pct = if (scale > 0) (level * 100 / scale).coerceIn(0, 100) else 0
+                  val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+                  val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+                  views.setProgressBar(R.id.battery_bar, 100, pct, false)
+                  views.setTextViewText(R.id.battery_text, "$pct%  •  ${if (charging) "REIATSU RECHARGING" else "SPIRIT ENERGY"}")
+
+                  val bankai = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_BANKAI, true)
+                  views.setTextViewText(R.id.mode_label, if (bankai) "BANKAI • 黒崎一護" else "SHIKAI • 黒崎一護")
+                  views.setTextViewText(R.id.mode_button, if (bankai) "BANKAI ACTIVE  •  TAP TO SEAL" else "TAP TO RELEASE BANKAI")
+                  views.setTextViewText(R.id.quote, if (bankai) "“Protect what matters.”" else "“Zangetsu… lend me your strength.”")
+                  views.setInt(R.id.widget_root, "setBackgroundResource", if (bankai) R.drawable.widget_bg else R.drawable.widget_bg_shikai)
+
+                  val open = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                  views.setOnClickPendingIntent(R.id.ichigo_art, open)
+                  val toggle = PendingIntent.getBroadcast(context, 1, Intent(context, IchigoWidgetProvider::class.java).setAction(ACTION_TOGGLE), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                  views.setOnClickPendingIntent(R.id.mode_button, toggle)
+                  views.setOnClickPendingIntent(R.id.info_panel, open)
+                  manager.updateAppWidget(id, views)
+              }
+          }
+          EOF_2
+          mkdir -p "$(dirname app/src/main/java/com/example/ichigowidget/MainActivity.kt)"
+          cat > app/src/main/java/com/example/ichigowidget/MainActivity.kt <<'EOF_3'
+          package com.example.ichigowidget
+
+          import android.app.Activity
+          import android.appwidget.AppWidgetManager
+          import android.content.ComponentName
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              private val prefs by lazy { getSharedPreferences("ichigo_widget_state", MODE_PRIVATE) }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.rgb(8, 6, 10))
+                      setPadding(dp(18), dp(18), dp(18), dp(20))
+                  }
+                  val poster = ImageView(this).apply {
+                      setImageResource(R.drawable.ichigo_bankai_art)
+                      scaleType = ImageView.ScaleType.CENTER_CROP
+                      contentDescription = "Ichigo Kurosaki Bankai artwork"
+                  }
+                  root.addView(poster, LinearLayout.LayoutParams(-1, 0, 1f))
+
+                  val header = text("ICHIGO KUROSAKI", 21f, 0xFFFF5C65.toInt(), true)
+                  header.setPadding(0, dp(14), 0, dp(3))
+                  root.addView(header)
+                  root.addView(text("BANKAI • 黒崎一護 • SOUL REAPER", 11f, 0xFFBFB3B8.toInt(), true))
+                  val status = text("", 13f, Color.WHITE, true).apply { setPadding(0, dp(12), 0, dp(8)) }
+                  root.addView(status)
+
+                  val action = Button(this).apply {
+                      setTextColor(Color.WHITE)
+                      textSize = 13f
+                      setAllCaps(false)
+                      background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                          intArrayOf(0xFF9D1825.toInt(), 0xFF36070D.toInt())).apply { cornerRadius = dp(10).toFloat() }
+                      setOnClickListener {
+                          val newBankai = !prefs.getBoolean("bankai_enabled", true)
+                          sendBroadcast(Intent(this@MainActivity, IchigoWidgetProvider::class.java).setAction(IchigoWidgetProvider.ACTION_TOGGLE))
+                          status.text = if (newBankai) "BANKAI STATE: RELEASED" else "SHIKAI STATE: SEALED"
+                          text = if (newBankai) "Seal Bankai" else "Release Bankai"
+                      }
+                  }
+                  root.addView(action, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(8) })
+
+                  val hint = text("Add the widget: long-press your home screen → Widgets → Ichigo Bankai.\nTap the widget button to switch Shikai / Bankai mode.", 12f, 0xFF9F969B.toInt(), false)
+                  hint.setPadding(0, dp(14), 0, 0)
+                  root.addView(hint)
+                  refreshStatus(status, action)
+                  setContentView(root)
+              }
+
+              private fun refreshStatus(status: TextView, button: Button) {
+                  val bankai = prefs.getBoolean("bankai_enabled", true)
+                  status.text = if (bankai) "BANKAI STATE: RELEASED" else "SHIKAI STATE: SEALED"
+                  button.text = if (bankai) "Seal Bankai" else "Release Bankai"
+              }
+
+              private fun text(value: String, size: Float, color: Int, bold: Boolean) = TextView(this).apply {
+                  text = value
+                  textSize = size
+                  setTextColor(color)
+                  gravity = Gravity.CENTER_HORIZONTAL
+                  if (bold) typeface = Typeface.DEFAULT_BOLD
+              }
+
+              private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+          }
+          EOF_3
+          mkdir -p "$(dirname app/src/main/res/drawable/app_icon.xml)"
+          cat > app/src/main/res/drawable/app_icon.xml <<'EOF_4'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#100609" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#B51B2A" android:pathData="M54,7C80,14 98,36 96,59C92,85 71,101 51,99C28,97 11,77 12,53C13,30 31,11 54,7Z" />
+              <path android:fillColor="#16070B" android:pathData="M18,26L38,37L31,18L51,32L60,13L67,35L89,24L75,45L96,51L72,59L85,81L63,69L55,96L45,71L21,88L34,64L10,53L33,47Z" />
+              <path android:fillColor="#F1E8E8" android:pathData="M54,18L60,45L87,54L60,62L54,90L47,62L20,54L47,45Z" />
+              <path android:fillColor="#8E101E" android:pathData="M54,25L58,47L78,54L58,60L54,82L49,60L29,54L49,47Z" />
+          </vector>
+          EOF_4
+          mkdir -p "$(dirname app/src/main/res/drawable/art_panel_bg.xml)"
+          cat > app/src/main/res/drawable/art_panel_bg.xml <<'EOF_5'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#190609" />
+              <corners android:radius="12dp" />
+          </shape>
+          EOF_5
+          mkdir -p "$(dirname app/src/main/res/drawable/reiatsu_progress.xml)"
+          cat > app/src/main/res/drawable/reiatsu_progress.xml <<'EOF_6'
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:id="@android:id/background"><shape><solid android:color="#3B2528"/><corners android:radius="4dp"/></shape></item>
+              <item android:id="@android:id/progress"><clip><shape><gradient android:startColor="#FF343D" android:endColor="#FF9A5A" android:angle="0"/><corners android:radius="4dp"/></shape></clip></item>
+          </layer-list>
+          EOF_6
+          mkdir -p "$(dirname app/src/main/res/drawable/widget_action_bg.xml)"
+          cat > app/src/main/res/drawable/widget_action_bg.xml <<'EOF_7'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <gradient android:angle="0" android:startColor="#8B1019" android:endColor="#35050A" />
+              <stroke android:width="1dp" android:color="#D64A50" />
+              <corners android:radius="5dp" />
+          </shape>
+          EOF_7
+          mkdir -p "$(dirname app/src/main/res/drawable/widget_bg.xml)"
+          cat > app/src/main/res/drawable/widget_bg.xml <<'EOF_8'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient android:startColor="#170609" android:endColor="#09090C" android:angle="0" />
+              <stroke android:width="1dp" android:color="#653037" />
+              <corners android:radius="18dp" />
+          </shape>
+          EOF_8
+          mkdir -p "$(dirname app/src/main/res/drawable/widget_bg_shikai.xml)"
+          cat > app/src/main/res/drawable/widget_bg_shikai.xml <<'EOF_9'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <gradient android:angle="0" android:startColor="#100B15" android:centerColor="#201626" android:endColor="#09070B" />
+              <stroke android:width="1dp" android:color="#7662B5" />
+              <corners android:radius="16dp" />
+          </shape>
+          EOF_9
+          mkdir -p "$(dirname app/src/main/res/layout/ichigo_widget.xml)"
+          cat > app/src/main/res/layout/ichigo_widget.xml <<'EOF_10'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/widget_root"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="horizontal" android:padding="7dp"
+              android:background="@drawable/widget_bg">
+
+              <ImageView android:id="@+id/ichigo_art" android:layout_width="116dp" android:layout_height="match_parent"
+                  android:src="@drawable/ichigo_bankai_art" android:scaleType="centerCrop"
+                  android:contentDescription="Ichigo Kurosaki Bankai artwork" android:background="#170608" />
+
+              <LinearLayout android:id="@+id/info_panel" android:layout_width="0dp" android:layout_height="match_parent"
+                  android:layout_weight="1" android:orientation="vertical" android:gravity="center_vertical"
+                  android:paddingStart="11dp" android:paddingEnd="8dp">
+                  <TextView android:id="@+id/mode_label" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                      android:text="BANKAI • 黒崎一護" android:textColor="#FF5757" android:textStyle="bold"
+                      android:textSize="10sp" android:letterSpacing="0.12" />
+                  <TextView android:id="@+id/time" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="00:00"
+                      android:textColor="#FFF8F8" android:textSize="30sp" android:textStyle="bold" android:fontFamily="sans" />
+                  <TextView android:id="@+id/date" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="MON • 01 JAN 2026"
+                      android:textColor="#BEB7B9" android:textSize="9sp" android:letterSpacing="0.06" android:layout_marginTop="-2dp" />
+                  <TextView android:id="@+id/quote" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Protect what matters."
+                      android:textColor="#D8C6C8" android:textSize="9sp" android:singleLine="true" android:ellipsize="end" android:layout_marginTop="5dp" />
+                  <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="REIATSU LEVEL"
+                      android:textColor="#FF7777" android:textSize="8sp" android:textStyle="bold" android:letterSpacing="0.14" android:layout_marginTop="5dp" />
+                  <ProgressBar android:id="@+id/battery_bar" style="@android:style/Widget.ProgressBar.Horizontal"
+                      android:layout_width="match_parent" android:layout_height="5dp" android:max="100" android:progress="50"
+                      android:progressDrawable="@drawable/reiatsu_progress" android:layout_marginTop="3dp" />
+                  <TextView android:id="@+id/battery_text" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="50% • SPIRIT ENERGY"
+                      android:textColor="#D7CDCF" android:textSize="8sp" android:layout_marginTop="3dp" />
+                  <TextView android:id="@+id/mode_button" android:layout_width="match_parent" android:layout_height="wrap_content"
+                      android:text="BANKAI ACTIVE • TAP TO SEAL" android:gravity="center" android:textColor="#FFF0F0"
+                      android:textSize="8sp" android:textStyle="bold" android:letterSpacing="0.04"
+                      android:background="@drawable/widget_action_bg" android:paddingVertical="5dp" android:layout_marginTop="5dp" />
+              </LinearLayout>
+          </LinearLayout>
+          EOF_10
+          mkdir -p "$(dirname app/src/main/res/xml/ichigo_widget_info.xml)"
+          cat > app/src/main/res/xml/ichigo_widget_info.xml <<'EOF_11'
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="250dp" android:minHeight="120dp" android:minResizeWidth="180dp" android:minResizeHeight="100dp"
+              android:initialLayout="@layout/ichigo_widget"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen"
+              android:updatePeriodMillis="1800000" />
+          EOF_11
+      - name: Add artwork
+        run: |
+          mkdir -p app/src/main/res/drawable-nodpi
+          if [ -f ichigo_bankai_art.png ]; then
+            cp ichigo_bankai_art.png app/src/main/res/drawable-nodpi/ichigo_bankai_art.png
+            echo "Using uploaded artwork"
+          else
+            echo "No artwork uploaded, using placeholder"
+            python3 - <<'PYEOF'
+          import zlib, struct
+          w = h = 64
+          raw = b"".join(b"\x00" + bytes([120, 20, 30]) * w for _ in range(h))
+          def chunk(t, d):
+              c = struct.pack(">I", len(d)) + t + d
+              return c + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+          data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+          open("app/src/main/res/drawable-nodpi/ichigo_bankai_art.png", "wb").write(data)
+          PYEOF
+          fi
       - name: Build debug APK
-        working-directory: ${{ steps.find.outputs.dir }}
         run: gradle assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
